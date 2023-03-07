@@ -2,15 +2,56 @@ var io
 var gameSocket
 var gamesInSession = []
 
-const initializeGame = (sio, socket, db) => {
+const crypto = require("crypto");
+
+var available_rooms = [];
+
+var rooms = {};
+
+class Player {
+    constructor(pid, socket) {
+        this.pid = pid;
+        this.socket = socket;
+    }
+}
+
+class Room {
+    constructor(host) {
+        this.room_id = crypto.randomUUID()
+        this.first_player = host;
+        this.second_player = null;
+        this.game_id = null;
+    }
+
+    get to_json(){
+        return {"room_id": this.room_id,
+            "first_player": this.first_player.pid,
+            "second_player": this.second_player.pid,
+            "game_id": this.game_id}
+    }
+}
+
+const initializeGame = (sio, socket, db, pid) => {
 
     io = sio
     gameSocket = socket
+
+    gameSocket.on('hello', hello_handler);
+
+    function hello_handler() {
+        gameSocket.emit("hello", "hello in game_engine!")
+    }
+
+    console.log("Were there! 1")
+
+    // Не торт
     // pushes this socket to an array which stores all the active sockets.
     gamesInSession.push(gameSocket)
 
     // Run code when the client disconnects from their socket session. 
     gameSocket.on("disconnect", onDisconnect)
+
+    gameSocket.on("quick_game", quick_game)
 
     // Sends new move to the other socket session in the same room. 
     gameSocket.on("new move", newMove)
@@ -25,30 +66,7 @@ const initializeGame = (sio, socket, db) => {
 
     gameSocket.on('recieved userName', recievedUserName)
 
-    // Обработчик начала игры
-    function start_game_handler(first_player_id, second_player_id) {
-        return db.tx(t => {
-            const now = new Date();
-            const entity = {
-                'id': -1,
-                'first_player_id': first_player_id,
-                'second_player_id': second_player_id,
-                'start_date': now.getFullYear() + "-" + (now.getMonth() + 1) + "-" + now.getDate(),
-                'start_time': now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds(),
-                'status': false
-            }
-            const query = 'INSERT INTO game_sessions(first_player_id, second_player_id, start_date, start_time, status)' +
-                'VALUES(${first_player_id}, ${second_player_id}, ${start_date}, ${start_time}, ${status}) RETURNING id';
-            return t.one(query, entity);
-        })
-            .then(data => {
-                return data;
-                // COMMIT
-            })
-            .catch(error => {
-                // ROLLBACK
-            });
-    }
+    gameSocket.on('get_user_information', get_user_information_handler)
 
     // Обработчик окончания игры
     function end_game_handler(start_game_handler, result ='', history ='') {
@@ -89,6 +107,83 @@ const initializeGame = (sio, socket, db) => {
                 console.error(error)
             })
     }
+
+    // Функция для получения информации об игроке.
+    function get_user_information_handler(input_data) {
+        return db.tx(t => {
+            const entity = {'id': input_data['id']}
+            const query = 'SELECT id, username FROM users WHERE id = ${id}';
+            return t.one(query, entity);
+        })
+            .then(data => {
+                // COMMIT
+                gameSocket.emit("get_user_information", {"id": data.id, "username": data.username})
+            })
+            .catch(error => {
+                // ROLLBACK
+                gameSocket.emit("get_user_information", {"id": -1})
+            });
+    }
+
+    // Обработчик начала игры.
+    function start_game_handler(first_player_id, second_player_id) {
+        return db.tx(t => {
+            const now = new Date();
+            const entity = {
+                'id': -1,
+                'first_player_id': first_player_id,
+                'second_player_id': second_player_id,
+                'start_date': now.getFullYear() + "-" + (now.getMonth() + 1) + "-" + now.getDate(),
+                'start_time': now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds(),
+                'status': false
+            }
+            const query = 'INSERT INTO game_sessions(first_player_id, second_player_id, start_date, start_time, status)' +
+                'VALUES(${first_player_id}, ${second_player_id}, ${start_date}, ${start_time}, ${status}) RETURNING id';
+            return t.one(query, entity);
+        })
+            .then(data => {
+                return data;
+                // COMMIT
+            })
+            .catch(error => {
+                console.log(error)
+                // ROLLBACK
+            });
+    }
+
+    // Нужно передать id пользователя, который был получен при авторизации.
+    // Так делать нельзя, но мы говнокодим.
+    function quick_game(input_data) {
+        let room = null;
+        // Создаем новую комнату, если нет свободных.
+        if (available_rooms.length === 0) {
+            // Добавляем первого игрока (хоста) в комнату.
+            room = new Room(new Player(input_data['id'], this));
+            this.emit('creating_room', {gameId: room.room_id});
+            this.join(room.room_id);
+            // Добавляем комнату в "поиск".
+            available_rooms.push(room)
+        } else {
+            // Находим свободную комнату.
+            room = available_rooms[0];
+            // Добавляем второго игрока в комнату.
+            room.second_player = new Player(input_data['id'], this);
+            this.emit('joining_room', {gameId: room.room_id});
+            this.join(room.room_id)
+            // Удаляем комнату из "поиска".
+            available_rooms = available_rooms.filter(x => {
+                return x.room_id !== room.room_id;
+            })
+            // Добавляем запись о начале игры в БД. Получаем ID игры.
+            start_game_handler(room.first_player.pid, room.second_player.pid).then(_data => {
+                room.game_id = _data.id;
+                room.first_player.socket.emit('start_game', room.to_json);
+                room.second_player.socket.emit('start_game', room.to_json);
+            });
+            // добавляем комнату в словарь (dict).
+            rooms[room.room_id] = room;
+        }
+    }
 }
 
 
@@ -126,7 +221,6 @@ function playerJoinsGame(idData) {
         this.emit('status', "There are already 2 people playing in this room.");
     }
 }
-
 
 function createNewGame(gameId) {
     console.log({gameId: gameId, mySocketId: this.id})

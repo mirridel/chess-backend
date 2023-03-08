@@ -1,6 +1,5 @@
 var io
 var gameSocket
-var gamesInSession = []
 
 const crypto = require("crypto");
 
@@ -131,9 +130,11 @@ const initializeGame = (sio, socket, db, pid) => {
 
     /**
      * Начало быстрой игры.
+     * КЛИЕНТ
      * Сообщение: start_quick_game
      * Данные: ничего передавать не нужно
      *
+     * СЕРВЕР
      * Если пользователь создал комнату:
      * Сообщение: creating_room
      * Данные: {"room_id": <>}
@@ -191,10 +192,12 @@ const initializeGame = (sio, socket, db, pid) => {
 
     /**
      * Конец быстрой игры.
+     * КЛИЕНТ
      * Сообщение: end_quick_game
      * Данные: {"room_id": <>,"result": <>,"history": <>}
      * Поле "room_id" обязательное!
      *
+     * СЕРВЕР
      * При завершении игры:
      * Сообщение: end_game
      * Данные: {"id": <>,"start_date": <>,"start_time": <>,"end_date": <>,"end_time": <>,"result": <>,"history": <>}
